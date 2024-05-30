@@ -59,6 +59,42 @@ public abstract class Query<T, R extends Publisher<?>> {
 	 */
 	public abstract QueryUrlBuilder getUrl();
 
+	public Mono<T> executeWithoutProcess() throws JikanQueryException {
+		String url = null;
+		try {
+			url = getUrl().build();
+			log.debug(JIKAN_MARKER, "Fetching request: {}", url);
+
+			final Mono<T> response;
+
+			final Optional<Object> cachedResults = jikan.cache.get(url);
+			if (cachedResults.isPresent()) {
+				log.trace(JIKAN_MARKER, "Found in cache: {}", url);
+
+				@SuppressWarnings("unchecked")
+				final Mono<Signal<T>> results = ((Mono<Signal<T>>) cachedResults.get());
+
+				response = results.dematerialize();
+			} else {
+				log.trace(JIKAN_MARKER, "Not found in cache: {}", url);
+				final String finalUrl = url;
+
+				response = jikan.httpClient.get().uri(url)
+						.responseSingle(this::extractResponse)
+						.retryWhen(Retry.backoff(jikan.maxRetries, Duration.ofMillis(500)).filter(th -> th instanceof JikanThrottleException))
+						.flatMap(holder -> {
+							// Store in the cache
+							jikan.cache.put(finalUrl, holder.result.materialize(), holder.expires);
+							return holder.result;
+						});
+			}
+
+			return response;
+		} catch (Exception e) {
+			throw new JikanQueryException("Error when executing query '" + getClass().getName() + "' with URL '" + url + "'", e);
+		}
+	}
+
 	public R execute() throws JikanQueryException {
 		String url = null;
 		try {
